@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Comparación de Propiedades</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+
+        .sidebar {
+            width: 350px;
+            background: white;
+            padding: 20px;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+
+        .map-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        h2 {
+            font-size: 16px;
+            margin: 20px 0 10px 0;
+            color: #555;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 13px;
+            color: #666;
+            font-weight: 500;
+        }
+
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+
+        input[type="text"]:focus, input[type="number"]:focus, select:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #4CAF50;
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .btn-primary:hover {
+            background: #45a049;
+        }
+
+        .btn-secondary {
+            background: #2196F3;
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .btn-secondary:hover {
+            background: #0b7dda;
+        }
+
+        .btn-clear {
+            background: #ff5722;
+            color: white;
+        }
+
+        .btn-clear:hover {
+            background: #e64a19;
+        }
+
+        .results {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .results h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .result-item {
+            padding: 8px;
+            margin-bottom: 5px;
+            background: white;
+            border-radius: 4px;
+            font-size: 13px;
+            border-left: 3px solid #4CAF50;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .stat-box {
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .info {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+
+        .code-section {
+            margin-top: 15px;
+            padding: 12px;
+            background: #263238;
+            border-radius: 6px;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .code-section pre {
+            margin: 0;
+            white-space: pre-wrap;
+        }
+
+        .endpoint-info {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <h1>🏠 Sistema de Tasación</h1>
+            
+            <div class="section">
+                <h2>Endpoints API</h2>
+                <div class="endpoint-info">
+                    POST /api/properties<br>
+                    POST /api/filter<br>
+                    GET /api/properties<br>
+                    GET /api/health
+                </div>
+                <button class="btn btn-secondary" onclick="showAPIDocumentation()">Ver Documentación API</button>
+                <button class="btn btn-primary" onclick="loadPropertiesFromAPI()">Cargar Propiedades del Servidor</button>
+            </div>
+
+            <div class="section">
+                <h2>Filtrar Comparables</h2>
+                
+                <label>Operación</label>
+                <select id="operacion">
+                    <option value="">Todas</option>
+                    <option value="venta">Venta</option>
+                    <option value="alquiler">Alquiler</option>
+                </select>
+
+                <label>Tipo de Propiedad</label>
+                <select id="tipo">
+                    <option value="">Todos</option>
+                    <option value="casa">Casa</option>
+                    <option value="departamento">Departamento</option>
+                    <option value="ph">PH</option>
+                    <option value="terreno">Terreno</option>
+                    <option value="otro">Otro</option>
+                </select>
+
+                <label>Ambientes</label>
+                <select id="ambientes">
+                    <option value="">Todos</option>
+                    <option value="1">1 Ambiente</option>
+                    <option value="2">2 Ambientes</option>
+                    <option value="3">3 Ambientes</option>
+                    <option value="4">4+ Ambientes</option>
+                </select>
+
+                <label>Latitud</label>
+                <input type="number" id="lat" step="0.0001" placeholder="-38.0055">
+
+                <label>Longitud</label>
+                <input type="number" id="lng" step="0.0001" placeholder="-57.5426">
+
+                <label>Radio (metros)</label>
+                <input type="number" id="radio" value="1000" min="100" step="100">
+
+                <button class="btn btn-primary" onclick="filterProperties()">Buscar Comparables</button>
+                <button class="btn btn-clear" onclick="clearFilters()">Limpiar Filtros</button>
+            </div>
+
+            <div id="results"></div>
+        </div>
+
+        <div class="map-container">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin;
+        let map;
+        let properties = [];
+        let markers = [];
+        let searchCircle = null;
+
+        // Inicializar mapa
+        function initMap() {
+            map = L.map('map').setView([-38.0055, -57.5426], 13);
+            
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
+
+            map.on('click', function(e) {
+                document.getElementById('lat').value = e.latlng.lat.toFixed(4);
+                document.getElementById('lng').value = e.latlng.lng.toFixed(4);
+            });
+        }
+
+        // Cargar propiedades desde el servidor
+        async function loadPropertiesFromAPI() {
+            try {
+                showMessage('info', 'Cargando propiedades del servidor...');
+                const response = await fetch(`${API_URL}/api/properties`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    properties = data.properties;
+                    renderProperties();
+                    showMessage('success', `${data.count} propiedades cargadas del servidor`);
+                } else {
+                    showMessage('error', 'Error al cargar propiedades');
+                }
+            } catch (error) {
+                showMessage('error', 'Error de conexión con el servidor: ' + error.message);
+            }
+        }
+
+        // Renderizar propiedades en el mapa
+        function renderProperties() {
+            markers.forEach(marker => map.removeLayer(marker));
+            markers = [];
+
+            properties.forEach(prop => {
+                const icon = L.divIcon({
+                    className: 'custom-marker',
+                    html: `<div style="background: #4CAF50; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>`,
+                    iconSize: [12, 12]
+                });
+
+                const marker = L.marker([prop.lat, prop.lng], { icon })
+                    .bindPopup(`
+                        <b>ID: ${prop.id}</b><br>
+                        Operación: ${prop.operacion}<br>
+                        Tipo: ${prop.tipo}<br>
+                        Ambientes: ${prop.ambientes}
+                    `);
+                
+                marker.addTo(map);
+                markers.push(marker);
+            });
+        }
+
+        // Filtrar propiedades
+        async function filterProperties() {
+            const operacion = document.getElementById('operacion').value;
+            const tipo = document.getElementById('tipo').value;
+            const ambientes = document.getElementById('ambientes').value;
+            const lat = parseFloat(document.getElementById('lat').value);
+            const lng = parseFloat(document.getElementById('lng').value);
+            const radio = parseFloat(document.getElementById('radio').value);
+
+            if (!lat || !lng) {
+                showMessage('error', 'Por favor ingresa las coordenadas (lat/lng)');
+                return;
+            }
+
+            try {
+                showMessage('info', 'Filtrando propiedades...');
+                
+                const response = await fetch(`${API_URL}/api/filter`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        operacion: operacion || undefined,
+                        tipo: tipo || undefined,
+                        ambientes: ambientes || undefined,
+                        lat,
+                        lng,
+                        radio
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayResults(data, lat, lng);
+                    drawSearchArea(lat, lng, radio);
+                    highlightFilteredProperties(data.ids);
+                } else {
+                    showMessage('error', 'Error al filtrar: ' + data.error);
+                }
+            } catch (error) {
+                showMessage('error', 'Error de conexión: ' + error.message);
+            }
+        }
+
+        // Dibujar área de búsqueda
+        function drawSearchArea(lat, lng, radio) {
+            if (searchCircle) {
+                map.removeLayer(searchCircle);
+            }
+
+            searchCircle = L.circle([lat, lng], {
+                color: '#2196F3',
+                fillColor: '#2196F3',
+                fillOpacity: 0.1,
+                radius: radio
+            }).addTo(map);
+
+            map.setView([lat, lng], 14);
+        }
+
+        // Mostrar resultados
+        function displayResults(data, lat, lng) {
+            const resultsDiv = document.getElementById('results');
+            
+            if (data.count === 0) {
+                resultsDiv.innerHTML = '<div class="error">No se encontraron propiedades comparables.</div>';
+                return;
+            }
+
+            let html = '<div class="results">';
+            html += '<h3>Resultados del Filtrado</h3>';
+            html += '<div class="stats">';
+            html += `<div class="stat-box"><div class="stat-value">${data.count}</div><div class="stat-label">Comparables</div></div>`;
+            html += `<div class="stat-box"><div class="stat-value">${properties.length}</div><div class="stat-label">Total</div></div>`;
+            html += '</div>';
+            
+            html += '<h3 style="margin-top: 15px;">Propiedades Encontradas:</h3>';
+            data.properties.forEach(prop => {
+                html += `<div class="result-item">
+                    <strong>${prop.id}</strong> - ${prop.tipo} (${prop.ambientes} amb) - ${prop.distance}m
+                </div>`;
+            });
+            
+            html += '<div class="code-section">';
+            html += '<strong>JSON Response:</strong><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            html += '</div>';
+            html += '</div>';
+            
+            resultsDiv.innerHTML = html;
+        }
+
+        // Resaltar propiedades filtradas
+        function highlightFilteredProperties(filteredIds) {
+            markers.forEach((marker, index) => {
+                const prop = properties[index];
+                if (filteredIds.includes(prop.id)) {
+                    marker.setIcon(L.divIcon({
+                        className: 'custom-marker',
+                        html: `<div style="background: #FF5722; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 10px rgba(255,87,34,0.5);"></div>`,
+                        iconSize: [16, 16]
+                    }));
+                } else {
+                    marker.setIcon(L.divIcon({
+                        className: 'custom-marker',
+                        html: `<div style="background: #4CAF50; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>`,
+                        iconSize: [12, 12]
+                    }));
+                }
+            });
+        }
+
+        // Limpiar filtros
+        function clearFilters() {
+            document.getElementById('operacion').value = '';
+            document.getElementById('tipo').value = '';
+            document.getElementById('ambientes').value = '';
+            document.getElementById('lat').value = '';
+            document.getElementById('lng').value = '';
+            document.getElementById('radio').value = '1000';
+            document.getElementById('results').innerHTML = '';
+            
+            if (searchCircle) {
+                map.removeLayer(searchCircle);
+                searchCircle = null;
+            }
+
+            renderProperties();
+        }
+
+        // Mostrar documentación
+        function showAPIDocumentation() {
+            const resultsDiv = document.getElementById('results');
+            
+            const docs = {
+                "POST /api/properties": {
+                    description: "Cargar propiedades desde n8n",
+                    body: {
+                        properties: [
+                            {
+                                id: "PROP001",
+                                operacion: "venta",
+                                tipo: "departamento",
+                                ambientes: 2,
+                                lat: -38.0055,
+                                lng: -57.5426
+                            }
+                        ],
+                        replace: false
+                    }
+                },
+                "POST /api/filter": {
+                    description: "Filtrar propiedades comparables",
+                    body: {
+                        operacion: "venta",
+                        tipo: "departamento",
+                        ambientes: 2,
+                        lat: -38.0055,
+                        lng: -57.5426,
+                        radio: 1000
+                    }
+                },
+                "GET /api/properties": {
+                    description: "Obtener todas las propiedades"
+                },
+                "GET /api/health": {
+                    description: "Health check del servidor"
+                }
+            };
+
+            let html = '<div class="results">';
+            html += '<h3>📚 Documentación de la API</h3>';
+            html += '<div class="code-section">';
+            html += '<strong>URL Base:</strong> ' + API_URL + '<br><br>';
+            html += '<pre>' + JSON.stringify(docs, null, 2) + '</pre>';
+            html += '</div>';
+            html += '</div>';
+            
+            resultsDiv.innerHTML = html;
+        }
+
+        // Mostrar mensajes
+        function showMessage(type, message) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `<div class="${type}">${message}</div>`;
+        }
+
+        // Inicializar
+        initMap();
+        loadPropertiesFromAPI();
+    </script>
+</body>
+</html>
