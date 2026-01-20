@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,17 +11,52 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// Base de datos en memoria (puedes cambiar a SQLite/PostgreSQL después)
-let properties = [];
+// Configuración de PostgreSQL
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Inicializar base de datos (crear tabla si no existe)
+async function initDatabase() {
+    try {
+        await pool.query(`
+            CREATE EXTENSION IF NOT EXISTS postgis;
+            
+            CREATE TABLE IF NOT EXISTS properties (
+                id VARCHAR(100) PRIMARY KEY,
+                operacion VARCHAR(50) NOT NULL,
+                tipo VARCHAR(50) NOT NULL,
+                ambientes INTEGER NOT NULL,
+                lat DOUBLE PRECISION NOT NULL,
+                lng DOUBLE PRECISION NOT NULL,
+                m2_totales INTEGER,
+                m2_cubiertos INTEGER,
+                antiguedad INTEGER,
+                precio DECIMAL(12, 2),
+                location GEOGRAPHY(POINT, 4326),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_properties_location ON properties USING GIST(location);
+            CREATE INDEX IF NOT EXISTS idx_properties_operacion ON properties(operacion);
+            CREATE INDEX IF NOT EXISTS idx_properties_tipo ON properties(tipo);
+        `);
+        console.log('✅ Base de datos inicializada correctamente');
+    } catch (error) {
+        console.error('❌ Error al inicializar base de datos:', error);
+    }
+}
 
 // ==================== ENDPOINTS PARA N8N ====================
 
-// Endpoint 1: Recibir propiedades desde n8n
-app.post('/api/properties', (req, res) => {
+// Endpoint 1: Cargar propiedades desde n8n
+app.post('/api/properties', async (req, res) => {
     try {
-        const { properties: newProperties, replace } = req.body;
+        const { properties, replace } = req.body;
         
-        if (!newProperties || !Array.isArray(newProperties)) {
+        if (!properties || !Array.isArray(properties)) {
             return res.status(400).json({ 
                 success: false, 
                 error: 'Se requiere un array de propiedades' 
@@ -28,7 +64,7 @@ app.post('/api/properties', (req, res) => {
         }
 
         // Validar estructura de propiedades
-        const invalidProps = newProperties.filter(prop => 
+        const invalidProps = properties.filter(prop => 
             !prop.id || !prop.operacion || !prop.tipo || 
             !prop.ambientes || !prop.lat || !prop.lng
         );
@@ -41,25 +77,61 @@ app.post('/api/properties', (req, res) => {
             });
         }
 
+        // Si replace=true, borrar todas las propiedades primero
         if (replace) {
-            // Reemplazar toda la base de datos
-            properties = newProperties;
-        } else {
-            // Agregar o actualizar propiedades
-            newProperties.forEach(newProp => {
-                const index = properties.findIndex(p => p.id === newProp.id);
-                if (index !== -1) {
-                    properties[index] = newProp; // Actualizar
-                } else {
-                    properties.push(newProp); // Agregar
-                }
-            });
+            await pool.query('DELETE FROM properties');
         }
+
+        // Insertar o actualizar propiedades
+        let insertedCount = 0;
+        let updatedCount = 0;
+
+        for (const prop of properties) {
+            const result = await pool.query(`
+                INSERT INTO properties (id, operacion, tipo, ambientes, lat, lng, m2_totales, m2_cubiertos, antiguedad, precio, location)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ST_SetSRID(ST_MakePoint($6, $5), 4326))
+                ON CONFLICT (id) 
+                DO UPDATE SET 
+                    operacion = $2,
+                    tipo = $3,
+                    ambientes = $4,
+                    lat = $5,
+                    lng = $6,
+                    m2_totales = $7,
+                    m2_cubiertos = $8,
+                    antiguedad = $9,
+                    precio = $10,
+                    location = ST_SetSRID(ST_MakePoint($6, $5), 4326),
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING (xmax = 0) AS inserted
+            `, [
+                prop.id,
+                prop.operacion,
+                prop.tipo,
+                prop.ambientes,
+                prop.lat,
+                prop.lng,
+                prop.m2_totales || null,
+                prop.m2_cubiertos || null,
+                prop.antiguedad || null,
+                prop.precio || null
+            ]);
+
+            if (result.rows[0].inserted) {
+                insertedCount++;
+            } else {
+                updatedCount++;
+            }
+        }
+
+        // Obtener total de propiedades
+        const totalResult = await pool.query('SELECT COUNT(*) FROM properties');
+        const total = parseInt(totalResult.rows[0].count);
 
         res.json({ 
             success: true, 
-            message: `${newProperties.length} propiedades procesadas`,
-            total: properties.length 
+            message: `${insertedCount} insertadas, ${updatedCount} actualizadas`,
+            total: total 
         });
     } catch (error) {
         console.error('Error al procesar propiedades:', error);
@@ -71,9 +143,9 @@ app.post('/api/properties', (req, res) => {
 });
 
 // Endpoint 2: Filtrar propiedades comparables
-app.post('/api/filter', (req, res) => {
+app.post('/api/filter', async (req, res) => {
     try {
-        const { operacion, tipo, ambientes, lat, lng, radio } = req.body;
+        const { operacion, tipo, ambientes, lat, lng, radio, m2_min, m2_max, antiguedad_max } = req.body;
 
         // Validar datos requeridos
         if (!lat || !lng || !radio) {
@@ -83,38 +155,89 @@ app.post('/api/filter', (req, res) => {
             });
         }
 
-        // Filtrar propiedades
-        const filtered = properties.filter(prop => {
-            // Filtro por distancia
-            const distance = calculateDistance(lat, lng, prop.lat, prop.lng);
-            if (distance > radio) return false;
+        // Construir query dinámico
+        let queryText = `
+            SELECT 
+                id,
+                operacion,
+                tipo,
+                ambientes,
+                lat,
+                lng,
+                m2_totales,
+                m2_cubiertos,
+                antiguedad,
+                precio,
+                ST_Distance(location, ST_SetSRID(ST_MakePoint($1, $2), 4326)) as distance
+            FROM properties
+            WHERE ST_DWithin(location, ST_SetSRID(ST_MakePoint($1, $2), 4326), $3)
+        `;
 
-            // Filtros opcionales por datos duros
-            if (operacion && prop.operacion !== operacion) return false;
-            if (tipo && prop.tipo !== tipo) return false;
-            if (ambientes && prop.ambientes !== parseInt(ambientes)) return false;
+        const queryParams = [lng, lat, radio];
+        let paramIndex = 4;
 
-            return true;
-        });
+        // Filtros opcionales
+        if (operacion) {
+            queryText += ` AND operacion = $${paramIndex}`;
+            queryParams.push(operacion);
+            paramIndex++;
+        }
 
-        // Calcular distancias para cada propiedad filtrada
-        const results = filtered.map(prop => ({
-            id: prop.id,
-            distance: Math.round(calculateDistance(lat, lng, prop.lat, prop.lng)),
-            operacion: prop.operacion,
-            tipo: prop.tipo,
-            ambientes: prop.ambientes
+        if (tipo) {
+            queryText += ` AND tipo = $${paramIndex}`;
+            queryParams.push(tipo);
+            paramIndex++;
+        }
+
+        if (ambientes) {
+            queryText += ` AND ambientes = $${paramIndex}`;
+            queryParams.push(parseInt(ambientes));
+            paramIndex++;
+        }
+
+        if (m2_min) {
+            queryText += ` AND m2_totales >= $${paramIndex}`;
+            queryParams.push(parseInt(m2_min));
+            paramIndex++;
+        }
+
+        if (m2_max) {
+            queryText += ` AND m2_totales <= $${paramIndex}`;
+            queryParams.push(parseInt(m2_max));
+            paramIndex++;
+        }
+
+        if (antiguedad_max) {
+            queryText += ` AND (antiguedad IS NULL OR antiguedad <= $${paramIndex})`;
+            queryParams.push(parseInt(antiguedad_max));
+            paramIndex++;
+        }
+
+        queryText += ` ORDER BY distance ASC`;
+
+        const result = await pool.query(queryText, queryParams);
+
+        // Formatear resultados
+        const properties = result.rows.map(row => ({
+            id: row.id,
+            distance: Math.round(row.distance),
+            operacion: row.operacion,
+            tipo: row.tipo,
+            ambientes: row.ambientes,
+            m2_totales: row.m2_totales,
+            m2_cubiertos: row.m2_cubiertos,
+            antiguedad: row.antiguedad,
+            precio: row.precio ? parseFloat(row.precio) : null,
+            lat: row.lat,
+            lng: row.lng
         }));
-
-        // Ordenar por distancia
-        results.sort((a, b) => a.distance - b.distance);
 
         res.json({
             success: true,
-            count: results.length,
-            ids: results.map(r => r.id),
-            properties: results,
-            filters: { operacion, tipo, ambientes, lat, lng, radio }
+            count: properties.length,
+            ids: properties.map(p => p.id),
+            properties: properties,
+            filters: { operacion, tipo, ambientes, lat, lng, radio, m2_min, m2_max, antiguedad_max }
         });
     } catch (error) {
         console.error('Error al filtrar propiedades:', error);
@@ -126,60 +249,136 @@ app.post('/api/filter', (req, res) => {
 });
 
 // Endpoint 3: Obtener todas las propiedades (para el frontend)
-app.get('/api/properties', (req, res) => {
-    res.json({
-        success: true,
-        count: properties.length,
-        properties: properties
-    });
-});
-
-// Endpoint 4: Eliminar propiedad
-app.delete('/api/properties/:id', (req, res) => {
-    const { id } = req.params;
-    const index = properties.findIndex(p => p.id === id);
-    
-    if (index === -1) {
-        return res.status(404).json({
-            success: false,
-            error: 'Propiedad no encontrada'
+app.get('/api/properties', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM properties ORDER BY created_at DESC');
+        
+        res.json({
+            success: true,
+            count: result.rows.length,
+            properties: result.rows
+        });
+    } catch (error) {
+        console.error('Error al obtener propiedades:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
         });
     }
-
-    properties.splice(index, 1);
-    res.json({
-        success: true,
-        message: `Propiedad ${id} eliminada`,
-        total: properties.length
-    });
 });
 
-// Endpoint 5: Health check (para mantener el servicio activo)
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        properties_count: properties.length
-    });
+// Endpoint 4: Obtener una propiedad por ID
+app.get('/api/properties/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('SELECT * FROM properties WHERE id = $1', [id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Propiedad no encontrada'
+            });
+        }
+
+        res.json({
+            success: true,
+            property: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error al obtener propiedad:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
 });
 
-// ==================== FUNCIONES AUXILIARES ====================
+// Endpoint 5: Eliminar propiedad
+app.delete('/api/properties/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('DELETE FROM properties WHERE id = $1 RETURNING *', [id]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Propiedad no encontrada'
+            });
+        }
 
-// Calcular distancia entre dos puntos (fórmula Haversine)
-function calculateDistance(lat1, lng1, lat2, lng2) {
-    const R = 6371e3; // Radio de la Tierra en metros
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lng2 - lng1) * Math.PI / 180;
+        const totalResult = await pool.query('SELECT COUNT(*) FROM properties');
+        const total = parseInt(totalResult.rows[0].count);
 
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        res.json({
+            success: true,
+            message: `Propiedad ${id} eliminada`,
+            total: total
+        });
+    } catch (error) {
+        console.error('Error al eliminar propiedad:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
 
-    return R * c; // Distancia en metros
-}
+// Endpoint 6: Estadísticas
+app.get('/api/stats', async (req, res) => {
+    try {
+        const totalResult = await pool.query('SELECT COUNT(*) FROM properties');
+        const byOperacion = await pool.query(`
+            SELECT operacion, COUNT(*) as count 
+            FROM properties 
+            GROUP BY operacion
+        `);
+        const byTipo = await pool.query(`
+            SELECT tipo, COUNT(*) as count 
+            FROM properties 
+            GROUP BY tipo
+        `);
+
+        res.json({
+            success: true,
+            total: parseInt(totalResult.rows[0].count),
+            by_operacion: byOperacion.rows.reduce((acc, row) => {
+                acc[row.operacion] = parseInt(row.count);
+                return acc;
+            }, {}),
+            by_tipo: byTipo.rows.reduce((acc, row) => {
+                acc[row.tipo] = parseInt(row.count);
+                return acc;
+            }, {})
+        });
+    } catch (error) {
+        console.error('Error al obtener estadísticas:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Endpoint 7: Health check
+app.get('/api/health', async (req, res) => {
+    try {
+        await pool.query('SELECT 1');
+        const totalResult = await pool.query('SELECT COUNT(*) FROM properties');
+        
+        res.json({
+            status: 'ok',
+            database: 'connected',
+            timestamp: new Date().toISOString(),
+            properties_count: parseInt(totalResult.rows[0].count)
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'error',
+            database: 'disconnected',
+            error: error.message
+        });
+    }
+});
 
 // Servir el frontend
 app.get('/', (req, res) => {
@@ -187,8 +386,16 @@ app.get('/', (req, res) => {
 });
 
 // Iniciar servidor
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
     console.log(`📍 Frontend: http://localhost:${PORT}`);
     console.log(`🔌 API: http://localhost:${PORT}/api/`);
+    await initDatabase();
+});
+
+// Manejo de cierre graceful
+process.on('SIGTERM', async () => {
+    console.log('SIGTERM recibido, cerrando conexiones...');
+    await pool.end();
+    process.exit(0);
 });
